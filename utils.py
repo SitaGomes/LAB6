@@ -2,6 +2,8 @@ import requests
 import os
 from querys import querys
 from dotenv import load_dotenv
+import csv
+
 
 load_dotenv()
 
@@ -11,6 +13,7 @@ GRAPHQL_URL = os.getenv("GITHUB_API_URL")
 
 # Function to execute the GraphQL query
 def fetch_repositories(owner, first, cursor):
+    
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 
     variables = {
@@ -29,3 +32,13 @@ def fetch_repositories(owner, first, cursor):
         return response.json()
     else:
         raise Exception(f"Query failed with status code {response.status_code}: {response.text}")
+
+def save_to_csv(data, filename):
+    with open(filename,
+              mode='w',
+              newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(data[0].keys())
+        for item in data:
+            writer.writerow(item.values())
+    print(f"Data saved to {filename}")
