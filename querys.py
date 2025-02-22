@@ -1,16 +1,34 @@
-mostFamousQuery = """
-query {
-  search(query: "stars:>1 sort:stars-desc", type: REPOSITORY, first: 100) {
+querys = """
+query($first: Int!, $cursor: String) {
+  search(query: "stars:>1 sort:stars-desc", type: REPOSITORY, first: $first, after: $cursor) {
     nodes {
       ... on Repository {
         name
-        owner {
-          login
+        owner { login }
+        stargazers { totalCount }
+        
+        pullRequests(states:[MERGED]) {
+          totalCount
         }
-        stargazerCount
-        description
-        url
+        
+        allIssues: issues(states:[OPEN,CLOSED]){
+          totalCount 
+        }
+
+        closedIssues: issues(states:[CLOSED]){
+          totalCount 
+        }
+
+        primaryLanguage{
+          name 
+        }
+
+        createdAt
       }
+    }
+    pageInfo {
+      endCursor
+      hasNextPage
     }
   }
 }
