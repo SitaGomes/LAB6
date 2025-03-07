@@ -7,23 +7,30 @@ query($first: Int!, $cursor: String) {
         owner { login }
         stargazers { totalCount }
         
-        pullRequests(states:[MERGED]) {
+        pullRequests(states: [MERGED]) {
           totalCount
         }
         
-        allIssues: issues(states:[OPEN,CLOSED]){
+        allIssues: issues(states: [OPEN, CLOSED]) {
           totalCount 
         }
 
-        closedIssues: issues(states:[CLOSED]){
+        closedIssues: issues(states: [CLOSED]) {
           totalCount 
         }
 
-        primaryLanguage{
+        primaryLanguage {
           name 
         }
 
         createdAt
+        
+        # Added fields:
+        releases {
+          totalCount
+        }
+        
+        updatedAt
       }
     }
     pageInfo {
