@@ -1,0 +1,33 @@
+Quality Analysis Report
+======================
+
+RQ 01: Repository Popularity vs Quality Metrics
+--------------------------------------------
+CBO: Correlation = 0.000, p-value = 1.000
+WMC: Correlation = 0.000, p-value = 1.000
+RFC: Correlation = 0.000, p-value = 1.000
+LCOM: Correlation = 0.000, p-value = 1.000
+LOC: Correlation = 0.000, p-value = 1.000
+
+RQ 02: Repository Maturity vs Quality Metrics
+--------------------------------------------
+CBO: Correlation = 0.707, p-value = 0.182
+WMC: Correlation = 0.707, p-value = 0.182
+RFC: Correlation = 0.707, p-value = 0.182
+LCOM: Correlation = 0.707, p-value = 0.182
+LOC: Correlation = 0.707, p-value = 0.182
+
+RQ 03: Repository Activity vs Quality Metrics
+--------------------------------------------
+CBO: Correlation = 0.000, p-value = 1.000
+WMC: Correlation = 0.000, p-value = 1.000
+RFC: Correlation = 0.000, p-value = 1.000
+LCOM: Correlation = 0.000, p-value = 1.000
+LOC: Correlation = 0.000, p-value = 1.000
+
+RQ 04: Repository Size vs Quality Metrics
+----------------------------------------
+CBO: Correlation = 1.000, p-value = 0.000
+WMC: Correlation = 1.000, p-value = 0.000
+RFC: Correlation = 1.000, p-value = 0.000
+LCOM: Correlation = 1.000, p-value = 0.000
