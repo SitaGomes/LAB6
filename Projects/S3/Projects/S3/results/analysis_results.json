@@ -1,0 +1,42 @@
+{
+    "RQ01": {
+        "files_correlation": 0.03529741195410886,
+        "files_p_value": 0.08924475941058523,
+        "changes_correlation": 0.006829300315612345,
+        "changes_p_value": 0.7423837539846849
+    },
+    "RQ02": {
+        "correlation": -0.4588355952480333,
+        "p_value": 4.171926533699269e-121
+    },
+    "RQ03": {
+        "correlation": -0.07179547097089539,
+        "p_value": 0.0005402075816708069
+    },
+    "RQ04": {
+        "participants_correlation": NaN,
+        "participants_p_value": NaN,
+        "comments_correlation": NaN,
+        "comments_p_value": NaN
+    },
+    "RQ05": {
+        "files_correlation": NaN,
+        "files_p_value": NaN,
+        "changes_correlation": NaN,
+        "changes_p_value": NaN
+    },
+    "RQ06": {
+        "correlation": NaN,
+        "p_value": NaN
+    },
+    "RQ07": {
+        "correlation": NaN,
+        "p_value": NaN
+    },
+    "RQ08": {
+        "participants_correlation": NaN,
+        "participants_p_value": NaN,
+        "comments_correlation": NaN,
+        "comments_p_value": NaN
+    }
+}

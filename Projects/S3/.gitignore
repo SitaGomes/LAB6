@@ -23,12 +23,6 @@ var/
 .installed.cfg
 *.egg
 
-# Data and results
-data/
-results/
-plots/
-report/
-
 # Logs
 *.log
 

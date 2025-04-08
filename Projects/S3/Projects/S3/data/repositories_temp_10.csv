@@ -1,0 +1,11 @@
+name,owner,url,pullRequests
+freeCodeCamp,{'login': 'freeCodeCamp'},https://github.com/freeCodeCamp/freeCodeCamp,{'totalCount': 39556}
+build-your-own-x,{'login': 'codecrafters-io'},https://github.com/codecrafters-io/build-your-own-x,{'totalCount': 279}
+awesome,{'login': 'sindresorhus'},https://github.com/sindresorhus/awesome,{'totalCount': 2072}
+free-programming-books,{'login': 'EbookFoundation'},https://github.com/EbookFoundation/free-programming-books,{'totalCount': 10409}
+public-apis,{'login': 'public-apis'},https://github.com/public-apis/public-apis,{'totalCount': 2961}
+coding-interview-university,{'login': 'jwasham'},https://github.com/jwasham/coding-interview-university,{'totalCount': 1005}
+developer-roadmap,{'login': 'kamranahmedse'},https://github.com/kamranahmedse/developer-roadmap,{'totalCount': 5004}
+system-design-primer,{'login': 'donnemartin'},https://github.com/donnemartin/system-design-primer,{'totalCount': 329}
+996.ICU,{'login': '996icu'},https://github.com/996icu/996.ICU,{'totalCount': 1983}
+awesome-python,{'login': 'vinta'},https://github.com/vinta/awesome-python,{'totalCount': 1547}
