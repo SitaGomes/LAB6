@@ -10,6 +10,7 @@ import time
 from tqdm import tqdm
 import json
 from dotenv import load_dotenv
+import concurrent.futures
 
 # Load environment variables from .env file
 load_dotenv()
@@ -91,7 +92,9 @@ def fetch_repository_pr_count(owner, name, timeout=30):
         "owner": owner,
         "name": name
     }
-    return execute_query(query_repository_pr_count, variables, timeout=timeout)
+    # Return the result along with owner/name for identification in concurrent calls
+    result = execute_query(query_repository_pr_count, variables, timeout=timeout)
+    return owner, name, result
 
 def fetch_pull_requests(owner, name, first=100, cursor=None, timeout=30):
     """Fetch pull requests for a specific repository"""
@@ -145,222 +148,297 @@ def fetch_pull_request_participants_count(owner, name, pr_number, timeout=30):
     return execute_query(query_pull_request_participants_count, variables, timeout=timeout)
 
 def gather_repository_data(limit=200, timeout=30):
-    """Gather top repositories data according to criteria"""
-    repositories = []
+    """Gather top repositories data according to criteria, fetching PR counts concurrently"""
+    repositories_found = []
     cursor = None
-    
-    progress_bar = tqdm(total=limit, desc="Fetching repositories")
-    
-    while len(repositories) < limit:
-        batch_size = min(10, limit - len(repositories))  # Reduced batch size further to 10
+    potential_repos = []
+
+    print("Fetching potential repositories...")
+    # Fetch initial batch of potential repositories
+    while len(potential_repos) < limit * 5 and len(potential_repos) < 1000: # Fetch more initially to have enough candidates
+        batch_size = min(100, 1000 - len(potential_repos)) # Fetch larger batches initially
         result = fetch_top_repositories(batch_size, cursor, timeout=timeout)
-        
+
         if not result or "data" not in result or "search" not in result["data"]:
-            print("Failed to fetch repositories or received invalid response")
+            print("Failed to fetch repositories batch or received invalid response")
             if result:
                 print(f"Response: {json.dumps(result, indent=2)}")
-            time.sleep(30)  # Wait before trying again
+            time.sleep(30)
             continue
-        
+
         page_info = result["data"]["search"]["pageInfo"]
         cursor = page_info["endCursor"]
-        
         repo_nodes = result["data"]["search"]["nodes"]
-        
-        # Check PR counts in a separate step
-        for repo in repo_nodes:
-            if not repo:
-                continue
-                
-            try:
+
+        potential_repos.extend(r for r in repo_nodes if r and "owner" in r and r["owner"] and "login" in r["owner"])
+
+        print(f"Gathered {len(potential_repos)} potential repositories...")
+
+        if not page_info["hasNextPage"]:
+            break
+        time.sleep(2) # Small delay between batches
+
+    if not potential_repos:
+        print("No potential repositories found.")
+        return []
+
+    print(f"Checking PR counts for {len(potential_repos)} potential repositories concurrently...")
+
+    repositories = []
+    tasks = []
+    max_workers = 10 # Limit concurrent API calls
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit tasks to fetch PR counts
+        for repo in potential_repos:
+             try:
                 owner = repo["owner"]["login"]
                 name = repo["name"]
-                
-                print(f"Checking PR count for {owner}/{name}")
-                
-                # Fetch PR count separately
-                time.sleep(1)  # Add a delay to avoid rate limiting
-                pr_count_result = fetch_repository_pr_count(owner, name, timeout=timeout)
-                
-                if not pr_count_result or "data" not in pr_count_result or not pr_count_result["data"]["repository"]:
-                    print(f"Failed to fetch PR count for {owner}/{name}")
-                    continue
-                
-                pr_count = pr_count_result["data"]["repository"]["pullRequests"]["totalCount"]
-                
-                # Add PR count to repository data
-                repo["pullRequests"] = {"totalCount": pr_count}
-                
-                if pr_count >= 100:
-                    repositories.append(repo)
-                    print(f"Found suitable repository: {owner}/{name} with {pr_count} PRs")
-                    progress_bar.update(1)
-                    
-                    # Save incrementally to avoid losing data
-                    if len(repositories) % 10 == 0:
-                        temp_df = pd.DataFrame(repositories)
-                        temp_df.to_csv(f'Projects/S3/data/repositories_temp_{len(repositories)}.csv', index=False)
-                        print(f"Saved {len(repositories)} repositories to temporary file")
-                    
-                    if len(repositories) >= limit:
-                        break
-            except (KeyError, TypeError) as e:
-                print(f"Error processing repository: {e}")
-                continue
-        
-        if not page_info["hasNextPage"] or len(repositories) >= limit:
-            break
-            
-        # Add a longer delay between repository batches
-        time.sleep(5)
-            
-    progress_bar.close()
-    
-    if not repositories:
-        print("Warning: No repositories matched the criteria. Check query or increase stars threshold.")
-    
-    # Trim to exact limit
-    return repositories[:limit]
+                tasks.append(executor.submit(fetch_repository_pr_count, owner, name, timeout))
+             except (KeyError, TypeError) as e:
+                 print(f"Skipping repo due to missing data: {e}")
+                 continue
 
-def gather_pull_requests(repositories, timeout=30):
-    """Gather pull requests from selected repositories that meet criteria"""
-    all_prs = []
-    
-    for repo in tqdm(repositories, desc="Processing repositories"):
-        owner = repo["owner"]["login"]
-        name = repo["name"]
-        
-        print(f"\nProcessing repository: {owner}/{name}")
-        
-        prs = []
-        cursor = None
-        
-        # Limit PRs per repository to avoid excessive API calls
-        max_prs_per_repo = 50  # Reduced from 100 to 50
-        repo_pr_count = 0
-        
-        # Step 1: Fetch basic PR data (timestamps, state)
+
+        progress_bar = tqdm(total=limit, desc="Filtering repositories by PR count")
+        processed_count = 0
+
+        for future in concurrent.futures.as_completed(tasks):
+            if len(repositories) >= limit:
+                # Cancel remaining futures if limit is reached
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                break # Exit the loop once limit is reached
+
+            try:
+                owner, name, pr_count_result = future.result()
+                processed_count += 1
+
+                if not pr_count_result or "data" not in pr_count_result or not pr_count_result["data"]["repository"]:
+                    # print(f"Failed to fetch PR count for {owner}/{name} (concurrent)")
+                    continue
+
+                pr_count = pr_count_result["data"]["repository"]["pullRequests"]["totalCount"]
+
+                if pr_count >= 100:
+                    # Find the original repo data to append
+                    original_repo = next((r for r in potential_repos if r["owner"]["login"] == owner and r["name"] == name), None)
+                    if original_repo:
+                        original_repo["pullRequests"] = {"totalCount": pr_count}
+                        repositories.append(original_repo)
+                        # print(f"Found suitable repository: {owner}/{name} with {pr_count} PRs")
+                        progress_bar.update(1)
+
+                        # Save incrementally
+                        if len(repositories) % 10 == 0:
+                           try:
+                               temp_df = pd.DataFrame(repositories)
+                               temp_df.to_csv(f'Projects/S3/data/repositories_temp_{len(repositories)}.csv', index=False)
+                               # print(f"Saved {len(repositories)} repositories to temporary file")
+                           except Exception as save_e:
+                               print(f"Error saving temporary repository file: {save_e}")
+
+            except concurrent.futures.CancelledError:
+                 # print("A repository check task was cancelled.")
+                 pass
+            except Exception as exc:
+                print(f'Repository check generated an exception: {exc}')
+
+            # Update progress description
+            progress_bar.set_description(f"Filtered {len(repositories)}/{limit} repos (checked {processed_count}/{len(tasks)})")
+
+
+    progress_bar.close()
+
+    if not repositories:
+        print("Warning: No repositories matched the criteria after checking PR counts.")
+
+    # Ensure executor is shut down
+    executor.shutdown(wait=False) # Don't wait for cancelled tasks
+
+    # Trim to exact limit
+    final_repositories = repositories[:limit]
+    print(f"Selected {len(final_repositories)} repositories matching criteria.")
+    return final_repositories
+
+
+def _process_single_repository(repo, repo_index, total_repos, max_prs_per_repo, timeout):
+    """Helper function to process PRs for a single repository."""
+    owner = repo["owner"]["login"]
+    name = repo["name"]
+    repo_prs = []
+    cursor = None
+    repo_pr_count = 0
+    processed_api_calls = 0 # Track API calls per repo for logging/debugging
+
+    # Use tqdm for individual repository progress
+    # desc=f"Repo {repo_index+1}/{total_repos} ({owner}/{name})"
+    pbar_repo = tqdm(total=max_prs_per_repo, desc=f"Repo {repo_index+1}/{total_repos} ({owner}/{name})", leave=False, position=repo_index % 10) # Use position for cleaner multi-bar display
+
+    try:
         while repo_pr_count < max_prs_per_repo:
-            batch_size = min(10, max_prs_per_repo - repo_pr_count)  # Reduced batch size to 10
+            batch_size = min(10, max_prs_per_repo - repo_pr_count)
             result = fetch_pull_requests(owner, name, batch_size, cursor, timeout=timeout)
-            
+            processed_api_calls += 1
+
             if not result or "data" not in result or "repository" not in result["data"]:
-                print(f"Failed to fetch PRs for {owner}/{name} or received invalid response")
-                if result:
-                    print(f"Response: {json.dumps(result, indent=2)}")
+                pbar_repo.set_description(f"Repo {repo_index+1}/{total_repos} ({owner}/{name}) - Fetch Error")
                 break
-                
+
             if result["data"]["repository"] is None:
-                print(f"Repository {owner}/{name} not found or not accessible")
-                break
-                
+                 pbar_repo.set_description(f"Repo {repo_index+1}/{total_repos} ({owner}/{name}) - Not Found")
+                 break
+
             pr_data = result["data"]["repository"]["pullRequests"]
             page_info = pr_data["pageInfo"]
             cursor = page_info["endCursor"]
-            
+
             if not pr_data["nodes"]:
-                print(f"No more PRs found for {owner}/{name}")
+                pbar_repo.set_description(f"Repo {repo_index+1}/{total_repos} ({owner}/{name}) - No More PRs")
                 break
-            
-            # Process fetched PRs
+
             for pr in pr_data["nodes"]:
                 if not pr:
                     continue
-                
+
                 try:
-                    # Calculate analysis duration in hours
                     created_at = datetime.fromisoformat(pr["createdAt"].replace('Z', '+00:00'))
-                    
-                    # Use appropriate end time based on PR state
                     if pr["state"] == "MERGED" and pr.get("mergedAt"):
                         end_time = datetime.fromisoformat(pr["mergedAt"].replace('Z', '+00:00'))
                     elif pr.get("closedAt"):
                         end_time = datetime.fromisoformat(pr["closedAt"].replace('Z', '+00:00'))
                     else:
-                        continue  # Skip PRs without a proper end time
-                    
-                    # Calculate duration in hours
+                        continue
+
                     duration_hours = (end_time - created_at).total_seconds() / 3600
-                    
-                    # Only proceed with PRs reviewed for at least 1 hour
+
                     if duration_hours > 1:
                         pr_number = pr["number"]
-                        
-                        # Step 2: Check if PR has reviews (separately)
-                        time.sleep(1)  # Add delay between requests
+
+                        # Sequential calls for details within a PR to respect secondary limits
+                        time.sleep(0.5)
                         review_result = fetch_pull_request_review_count(owner, name, pr_number, timeout=timeout)
-                        
+                        processed_api_calls += 1
                         if not review_result or "data" not in review_result or not review_result["data"]["repository"] or not review_result["data"]["repository"]["pullRequest"]:
-                            print(f"Failed to fetch review count for PR #{pr_number}")
                             continue
-                        
+
                         reviews_count = review_result["data"]["repository"]["pullRequest"]["reviews"]["totalCount"]
-                        
-                        # Only include PRs with at least one review
+
                         if reviews_count >= 1:
-                            # Step 3: Fetch additional PR details
-                            time.sleep(1)
+                            time.sleep(0.5)
                             details_result = fetch_pull_request_details(owner, name, pr_number, timeout=timeout)
-                            
+                            processed_api_calls += 1
                             if not details_result or "data" not in details_result or not details_result["data"]["repository"] or not details_result["data"]["repository"]["pullRequest"]:
-                                print(f"Failed to fetch details for PR #{pr_number}")
                                 continue
-                            
-                            # Add details to PR data
                             pr_details = details_result["data"]["repository"]["pullRequest"]
                             for key, value in pr_details.items():
                                 pr[key] = value
-                            
-                            # Step 4: Fetch comments count
-                            time.sleep(1)
+
+                            time.sleep(0.5)
                             comments_result = fetch_pull_request_comments_count(owner, name, pr_number, timeout=timeout)
-                            
+                            processed_api_calls += 1
                             if comments_result and "data" in comments_result and comments_result["data"]["repository"] and comments_result["data"]["repository"]["pullRequest"]:
                                 comments_count = comments_result["data"]["repository"]["pullRequest"]["comments"]["totalCount"]
                                 pr["comments"] = {"totalCount": comments_count}
-                            
-                            # Step 5: Fetch participants count
-                            time.sleep(1)
+
+                            time.sleep(0.5)
                             participants_result = fetch_pull_request_participants_count(owner, name, pr_number, timeout=timeout)
-                            
+                            processed_api_calls += 1
                             if participants_result and "data" in participants_result and participants_result["data"]["repository"] and participants_result["data"]["repository"]["pullRequest"]:
                                 participants_count = participants_result["data"]["repository"]["pullRequest"]["participants"]["totalCount"]
                                 pr["participants"] = {"totalCount": participants_count}
-                            
-                            # Add review count and repository info to PR data
+
                             pr["reviews"] = {"totalCount": reviews_count}
                             pr["repository"] = {"owner": owner, "name": name}
                             pr["duration_hours"] = duration_hours
-                            
-                            prs.append(pr)
+
+                            repo_prs.append(pr)
                             repo_pr_count += 1
-                            print(f"Added PR #{pr_number} with {reviews_count} reviews")
-                            
-                            # Break if we've reached the limit for this repository
+                            pbar_repo.update(1) # Update progress bar for this repo
+
                             if repo_pr_count >= max_prs_per_repo:
-                                break
+                                break # Exit inner loop if repo limit reached
+
                 except (ValueError, KeyError, TypeError) as e:
-                    print(f"Error processing PR {pr.get('number')}: {e}")
+                    # print(f"Error processing PR {pr.get('number', 'N/A')} in {owner}/{name}: {e}")
                     continue
-            
+
             if not page_info["hasNextPage"] or repo_pr_count >= max_prs_per_repo:
-                break
-                
-            # Add a delay between PR batches
-            time.sleep(3)
-        
-        print(f"Added {len(prs)} PRs from {owner}/{name}")
-        all_prs.extend(prs)
-        
-        # Save incrementally to avoid losing all data if there's an error
-        if len(all_prs) > 0:
-            temp_df = pd.DataFrame(all_prs)
-            temp_df.to_csv(f'Projects/S3/data/pull_requests_temp_{len(all_prs)}.csv', index=False)
-            print(f"Saved {len(all_prs)} PRs to temporary file")
-            
-        # Add a delay between repositories to avoid hitting rate limits
-        time.sleep(5)
-    
+                 break
+
+            time.sleep(1) # Delay between batches for the same repo
+
+        pbar_repo.set_description(f"Repo {repo_index+1}/{total_repos} ({owner}/{name}) - Done ({len(repo_prs)} PRs)")
+        pbar_repo.close()
+        # print(f"Finished {owner}/{name}. Found {len(repo_prs)} PRs. Made ~{processed_api_calls} API calls.")
+        return repo_prs
+
+    except Exception as e:
+         pbar_repo.set_description(f"Repo {repo_index+1}/{total_repos} ({owner}/{name}) - Error: {e}")
+         pbar_repo.close()
+         print(f"Unhandled error processing repository {owner}/{name}: {e}")
+         return [] # Return empty list on error
+
+
+def gather_pull_requests(repositories, timeout=30):
+    """Gather pull requests from selected repositories concurrently"""
+    all_prs = []
+    max_prs_per_repo = 50
+    max_workers = 5 # Limit concurrent repositories being processed
+
+    print(f"Processing {len(repositories)} repositories concurrently (max workers: {max_workers})...")
+
+    # Ensure the data directory exists before starting concurrent writes
+    os.makedirs('Projects/S3/data', exist_ok=True)
+
+    # Use ThreadPoolExecutor for concurrent repository processing
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Create futures for processing each repository
+        futures = {executor.submit(_process_single_repository, repo, i, len(repositories), max_prs_per_repo, timeout): repo
+                   for i, repo in enumerate(repositories)}
+
+        # Use tqdm for overall progress across repositories
+        # total=len(repositories) removed as bars update individually now
+        progress_bar = tqdm(concurrent.futures.as_completed(futures), total=len(repositories), desc="Overall PR Fetch Progress")
+
+        for future in progress_bar:
+            repo = futures[future]
+            owner = repo["owner"]["login"]
+            name = repo["name"]
+            try:
+                repo_prs = future.result()
+                if repo_prs:
+                    all_prs.extend(repo_prs)
+                    progress_bar.set_description(f"Overall Progress ({len(all_prs)} PRs total)")
+
+                    # Incremental save (consider locking if truly parallel writes needed, but extending list then saving should be mostly safe)
+                    if len(all_prs) > 0 and len(all_prs) % 50 == 0: # Save every 50 new PRs
+                         try:
+                            temp_df = pd.DataFrame(all_prs)
+                            # Use a consistent temporary filename pattern
+                            temp_filename = f'Projects/S3/data/pull_requests_temp_{len(all_prs)}.csv'
+                            temp_df.to_csv(temp_filename, index=False)
+                            # print(f"Saved {len(all_prs)} total PRs to {temp_filename}")
+                         except Exception as save_e:
+                            print(f"Error saving temporary PR file: {save_e}")
+
+            except Exception as exc:
+                print(f'Repository {owner}/{name} generated an exception during PR fetch: {exc}')
+
+    print(f"Finished processing all repositories. Total PRs gathered: {len(all_prs)}")
+
+    # Final save after all threads complete
+    if all_prs:
+        try:
+            final_df = pd.DataFrame(all_prs)
+            final_filename = 'Projects/S3/data/pull_requests.csv'
+            final_df.to_csv(final_filename, index=False)
+            print(f"Final combined data saved to {final_filename}")
+        except Exception as final_save_e:
+            print(f"Error saving final combined PR file: {final_save_e}")
+
+
     return all_prs
 
 def save_to_csv(data, filename):
@@ -376,189 +454,234 @@ def analyze_pr_status_vs_size(df):
     """RQ01: Analyze relationship between PR size and final review feedback"""
     # Convert PR state to binary outcome (MERGED=1, CLOSED=0)
     df['merged'] = df['state'].apply(lambda x: 1 if x == 'MERGED' else 0)
-    
-    # Correlation analysis with changed files
-    corr_files, p_value_files = stats.spearmanr(df['changedFiles'], df['merged'])
-    
+
+    # Drop rows where necessary columns for correlation are NaN
+    df_cleaned = df.dropna(subset=['changedFiles', 'merged'])
+    if df_cleaned.empty:
+        print("Warning RQ01: No valid data after dropping NaNs for files vs status.")
+        corr_files, p_value_files = np.nan, np.nan
+    else:
+        corr_files, p_value_files = stats.spearmanr(df_cleaned['changedFiles'], df_cleaned['merged'], nan_policy='omit')
+
     # Correlation analysis with total changes (additions + deletions)
     df['total_changes'] = df['additions'] + df['deletions']
-    corr_changes, p_value_changes = stats.spearmanr(df['total_changes'], df['merged'])
-    
+    df_cleaned = df.dropna(subset=['total_changes', 'merged'])
+    if df_cleaned.empty:
+        print("Warning RQ01: No valid data after dropping NaNs for changes vs status.")
+        corr_changes, p_value_changes = np.nan, np.nan
+    else:
+        corr_changes, p_value_changes = stats.spearmanr(df_cleaned['total_changes'], df_cleaned['merged'], nan_policy='omit')
+
     return {
-        'files_correlation': corr_files,
-        'files_p_value': p_value_files,
-        'changes_correlation': corr_changes,
-        'changes_p_value': p_value_changes
+        'files_correlation': corr_files if not np.isnan(corr_files) else 0, # Return 0 if NaN
+        'files_p_value': p_value_files if not np.isnan(p_value_files) else 1, # Return 1 if NaN
+        'changes_correlation': corr_changes if not np.isnan(corr_changes) else 0,
+        'changes_p_value': p_value_changes if not np.isnan(p_value_changes) else 1
     }
 
 def analyze_pr_status_vs_duration(df):
     """RQ02: Analyze relationship between PR analysis duration and final review feedback"""
     df['merged'] = df['state'].apply(lambda x: 1 if x == 'MERGED' else 0)
-    corr, p_value = stats.spearmanr(df['duration_hours'], df['merged'])
-    
+    # Drop rows where necessary columns for correlation are NaN
+    df_cleaned = df.dropna(subset=['duration_hours', 'merged'])
+    if df_cleaned.empty:
+        print("Warning RQ02: No valid data after dropping NaNs for duration vs status.")
+        corr, p_value = np.nan, np.nan
+    else:
+        corr, p_value = stats.spearmanr(df_cleaned['duration_hours'], df_cleaned['merged'], nan_policy='omit')
+
     return {
-        'correlation': corr,
-        'p_value': p_value
+        'correlation': corr if not np.isnan(corr) else 0,
+        'p_value': p_value if not np.isnan(p_value) else 1
     }
 
 def analyze_pr_status_vs_description(df):
     """RQ03: Analyze relationship between PR description length and final review feedback"""
     df['merged'] = df['state'].apply(lambda x: 1 if x == 'MERGED' else 0)
-    df['description_length'] = df['bodyText'].apply(lambda x: len(str(x)) if pd.notna(x) else 0)
-    corr, p_value = stats.spearmanr(df['description_length'], df['merged'])
-    
+    # Ensure bodyText is string before calculating length
+    df['description_length'] = df['bodyText'].fillna('').astype(str).apply(len)
+    # Drop rows where necessary columns for correlation are NaN (shouldn't happen with fillna)
+    df_cleaned = df.dropna(subset=['description_length', 'merged'])
+    if df_cleaned.empty:
+         print("Warning RQ03: No valid data after dropping NaNs for description vs status.")
+         corr, p_value = np.nan, np.nan
+    else:
+        corr, p_value = stats.spearmanr(df_cleaned['description_length'], df_cleaned['merged'], nan_policy='omit')
+
     return {
-        'correlation': corr,
-        'p_value': p_value
+        'correlation': corr if not np.isnan(corr) else 0,
+        'p_value': p_value if not np.isnan(p_value) else 1
     }
+
 
 def analyze_pr_status_vs_interactions(df):
     """RQ04: Analyze relationship between interactions in PRs and final review feedback"""
     df['merged'] = df['state'].apply(lambda x: 1 if x == 'MERGED' else 0)
-    
-    # Rename columns if needed for compatibility with older data format
-    if 'participants.totalCount' in df.columns:
-        participants_col = 'participants.totalCount'
-        comments_col = 'comments.totalCount'
-    else:
-        df['participants.totalCount'] = df['participants'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        df['comments.totalCount'] = df['comments'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        participants_col = 'participants.totalCount'
-        comments_col = 'comments.totalCount'
-    
+
+    # Standardize interaction columns safely
+    df['participants.totalCount'] = df.apply(lambda row: row.get('participants.totalCount', 0) if isinstance(row.get('participants'), float) else row.get('participants', {}).get('totalCount', 0), axis=1)
+    df['comments.totalCount'] = df.apply(lambda row: row.get('comments.totalCount', 0) if isinstance(row.get('comments'), float) else row.get('comments', {}).get('totalCount', 0), axis=1)
+
+    participants_col = 'participants.totalCount'
+    comments_col = 'comments.totalCount'
+
     # Correlation with number of participants
-    corr_participants, p_value_participants = stats.spearmanr(df[participants_col], df['merged'])
-    
+    df_cleaned_p = df.dropna(subset=[participants_col, 'merged'])
+    if df_cleaned_p.empty:
+        print("Warning RQ04: No valid data after dropping NaNs for participants vs status.")
+        corr_participants, p_value_participants = np.nan, np.nan
+    else:
+        corr_participants, p_value_participants = stats.spearmanr(df_cleaned_p[participants_col], df_cleaned_p['merged'], nan_policy='omit')
+
     # Correlation with number of comments
-    corr_comments, p_value_comments = stats.spearmanr(df[comments_col], df['merged'])
-    
+    df_cleaned_c = df.dropna(subset=[comments_col, 'merged'])
+    if df_cleaned_c.empty:
+         print("Warning RQ04: No valid data after dropping NaNs for comments vs status.")
+         corr_comments, p_value_comments = np.nan, np.nan
+    else:
+        corr_comments, p_value_comments = stats.spearmanr(df_cleaned_c[comments_col], df_cleaned_c['merged'], nan_policy='omit')
+
     return {
-        'participants_correlation': corr_participants,
-        'participants_p_value': p_value_participants,
-        'comments_correlation': corr_comments,
-        'comments_p_value': p_value_comments
+        'participants_correlation': corr_participants if not np.isnan(corr_participants) else 0,
+        'participants_p_value': p_value_participants if not np.isnan(p_value_participants) else 1,
+        'comments_correlation': corr_comments if not np.isnan(corr_comments) else 0,
+        'comments_p_value': p_value_comments if not np.isnan(p_value_comments) else 1
     }
 
 def analyze_reviews_vs_size(df):
     """RQ05: Analyze relationship between PR size and the number of reviews"""
-    # Rename columns if needed for compatibility with older data format
-    if 'reviews.totalCount' in df.columns:
-        reviews_col = 'reviews.totalCount'
-    else:
-        df['reviews.totalCount'] = df['reviews'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        reviews_col = 'reviews.totalCount'
-    
+    # Standardize reviews column safely
+    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
+    reviews_col = 'reviews.totalCount'
+
     # Correlation analysis with changed files
-    corr_files, p_value_files = stats.spearmanr(df['changedFiles'], df[reviews_col])
-    
+    df_cleaned_f = df.dropna(subset=['changedFiles', reviews_col])
+    if df_cleaned_f.empty:
+        print("Warning RQ05: No valid data after dropping NaNs for files vs reviews.")
+        corr_files, p_value_files = np.nan, np.nan
+    else:
+        corr_files, p_value_files = stats.spearmanr(df_cleaned_f['changedFiles'], df_cleaned_f[reviews_col], nan_policy='omit')
+
     # Correlation analysis with total changes (additions + deletions)
     df['total_changes'] = df['additions'] + df['deletions']
-    corr_changes, p_value_changes = stats.spearmanr(df['total_changes'], df[reviews_col])
-    
+    df_cleaned_c = df.dropna(subset=['total_changes', reviews_col])
+    if df_cleaned_c.empty:
+        print("Warning RQ05: No valid data after dropping NaNs for changes vs reviews.")
+        corr_changes, p_value_changes = np.nan, np.nan
+    else:
+        corr_changes, p_value_changes = stats.spearmanr(df_cleaned_c['total_changes'], df_cleaned_c[reviews_col], nan_policy='omit')
+
     return {
-        'files_correlation': corr_files,
-        'files_p_value': p_value_files,
-        'changes_correlation': corr_changes,
-        'changes_p_value': p_value_changes
+        'files_correlation': corr_files if not np.isnan(corr_files) else 0,
+        'files_p_value': p_value_files if not np.isnan(p_value_files) else 1,
+        'changes_correlation': corr_changes if not np.isnan(corr_changes) else 0,
+        'changes_p_value': p_value_changes if not np.isnan(p_value_changes) else 1
     }
 
 def analyze_reviews_vs_duration(df):
     """RQ06: Analyze relationship between PR analysis duration and the number of reviews"""
-    # Rename columns if needed for compatibility with older data format
-    if 'reviews.totalCount' in df.columns:
-        reviews_col = 'reviews.totalCount'
+    # Standardize reviews column safely
+    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
+    reviews_col = 'reviews.totalCount'
+
+    df_cleaned = df.dropna(subset=['duration_hours', reviews_col])
+    if df_cleaned.empty:
+        print("Warning RQ06: No valid data after dropping NaNs for duration vs reviews.")
+        corr, p_value = np.nan, np.nan
     else:
-        df['reviews.totalCount'] = df['reviews'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        reviews_col = 'reviews.totalCount'
-        
-    corr, p_value = stats.spearmanr(df['duration_hours'], df[reviews_col])
-    
+        corr, p_value = stats.spearmanr(df_cleaned['duration_hours'], df_cleaned[reviews_col], nan_policy='omit')
+
     return {
-        'correlation': corr,
-        'p_value': p_value
+        'correlation': corr if not np.isnan(corr) else 0,
+        'p_value': p_value if not np.isnan(p_value) else 1
     }
 
 def analyze_reviews_vs_description(df):
     """RQ07: Analyze relationship between PR description length and the number of reviews"""
-    # Rename columns if needed for compatibility with older data format
-    if 'reviews.totalCount' in df.columns:
-        reviews_col = 'reviews.totalCount'
+    # Standardize reviews column safely
+    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
+    reviews_col = 'reviews.totalCount'
+
+    # Ensure bodyText is string before calculating length
+    df['description_length'] = df['bodyText'].fillna('').astype(str).apply(len)
+    df_cleaned = df.dropna(subset=['description_length', reviews_col])
+    if df_cleaned.empty:
+         print("Warning RQ07: No valid data after dropping NaNs for description vs reviews.")
+         corr, p_value = np.nan, np.nan
     else:
-        df['reviews.totalCount'] = df['reviews'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        reviews_col = 'reviews.totalCount'
-        
-    df['description_length'] = df['bodyText'].apply(lambda x: len(str(x)) if pd.notna(x) else 0)
-    corr, p_value = stats.spearmanr(df['description_length'], df[reviews_col])
-    
+        corr, p_value = stats.spearmanr(df_cleaned['description_length'], df_cleaned[reviews_col], nan_policy='omit')
+
     return {
-        'correlation': corr,
-        'p_value': p_value
+        'correlation': corr if not np.isnan(corr) else 0,
+        'p_value': p_value if not np.isnan(p_value) else 1
     }
 
 def analyze_reviews_vs_interactions(df):
     """RQ08: Analyze relationship between interactions in PRs and the number of reviews"""
-    # Rename columns if needed for compatibility with older data format
-    if 'reviews.totalCount' in df.columns:
-        reviews_col = 'reviews.totalCount'
-        participants_col = 'participants.totalCount'
-        comments_col = 'comments.totalCount'
-    else:
-        df['reviews.totalCount'] = df['reviews'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        df['participants.totalCount'] = df['participants'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        df['comments.totalCount'] = df['comments'].apply(
-            lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
-        )
-        reviews_col = 'reviews.totalCount'
-        participants_col = 'participants.totalCount'
-        comments_col = 'comments.totalCount'
-    
+    # Standardize interaction and reviews columns safely
+    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
+    df['participants.totalCount'] = df.apply(lambda row: row.get('participants.totalCount', 0) if isinstance(row.get('participants'), float) else row.get('participants', {}).get('totalCount', 0), axis=1)
+    df['comments.totalCount'] = df.apply(lambda row: row.get('comments.totalCount', 0) if isinstance(row.get('comments'), float) else row.get('comments', {}).get('totalCount', 0), axis=1)
+
+    reviews_col = 'reviews.totalCount'
+    participants_col = 'participants.totalCount'
+    comments_col = 'comments.totalCount'
+
     # Correlation with number of participants
-    corr_participants, p_value_participants = stats.spearmanr(df[participants_col], df[reviews_col])
-    
+    df_cleaned_p = df.dropna(subset=[participants_col, reviews_col])
+    if df_cleaned_p.empty:
+        print("Warning RQ08: No valid data after dropping NaNs for participants vs reviews.")
+        corr_participants, p_value_participants = np.nan, np.nan
+    else:
+        corr_participants, p_value_participants = stats.spearmanr(df_cleaned_p[participants_col], df_cleaned_p[reviews_col], nan_policy='omit')
+
     # Correlation with number of comments
-    corr_comments, p_value_comments = stats.spearmanr(df[comments_col], df[reviews_col])
-    
+    df_cleaned_c = df.dropna(subset=[comments_col, reviews_col])
+    if df_cleaned_c.empty:
+         print("Warning RQ08: No valid data after dropping NaNs for comments vs reviews.")
+         corr_comments, p_value_comments = np.nan, np.nan
+    else:
+        corr_comments, p_value_comments = stats.spearmanr(df_cleaned_c[comments_col], df_cleaned_c[reviews_col], nan_policy='omit')
+
+
     return {
-        'participants_correlation': corr_participants,
-        'participants_p_value': p_value_participants,
-        'comments_correlation': corr_comments,
-        'comments_p_value': p_value_comments
+        'participants_correlation': corr_participants if not np.isnan(corr_participants) else 0,
+        'participants_p_value': p_value_participants if not np.isnan(p_value_participants) else 1,
+        'comments_correlation': corr_comments if not np.isnan(corr_comments) else 0,
+        'comments_p_value': p_value_comments if not np.isnan(p_value_comments) else 1
     }
 
+
 def plot_results(results, title, x_label, y_label, filename):
-    """Generate a plot for the analysis results"""
+    """Generate a plot for the analysis results, handling potential NaN"""
     plt.figure(figsize=(10, 6))
-    
-    # Check if results is a list or a single value
-    if isinstance(results, list):
-        bars = plt.bar(range(len(results)), results)
-        plt.xticks(range(len(results)), x_label)
-    else:
-        bars = plt.bar([0], [results])
-        plt.xticks([0], [x_label])
-    
-    plt.ylabel(y_label)
-    plt.title(title)
-    
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                 f'{height:.3f}', ha='center', va='bottom')
-    
-    plt.tight_layout()
-    plt.savefig(filename)
-    plt.close() 
+
+    # Ensure results are numeric and handle potential NaNs passed in
+    try:
+        if isinstance(results, list):
+            # Convert potential NaNs in the list to 0 for plotting
+            numeric_results = [float(r) if pd.notna(r) else 0 for r in results]
+            bars = plt.bar(range(len(numeric_results)), numeric_results)
+            plt.xticks(range(len(numeric_results)), x_label) # Use original x_label list
+        else:
+            # Convert potential NaN to 0 for plotting
+            numeric_result = float(results) if pd.notna(results) else 0
+            bars = plt.bar([0], [numeric_result])
+            plt.xticks([0], [x_label]) # Use original x_label (string)
+
+        plt.ylabel(y_label)
+        plt.title(title)
+
+        for bar in bars:
+            height = bar.get_height()
+            # Display the actual numeric value used for the bar height
+            plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                     f'{height:.3f}', ha='center', va='bottom')
+
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close()
+        # print(f"Plot saved: {filename}")
+    except Exception as e:
+        print(f"Error generating plot '{title}': {e}")
+        plt.close() # Ensure plot is closed even if error occurs 

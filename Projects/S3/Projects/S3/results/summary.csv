@@ -1,7 +1,0 @@
-Research Question,Dimension,Vs. Status,Vs. Reviews
-RQ01,Changed Files,0.035 (p=0.089),nan (p=nan)
-RQ01,Total Changes,0.007 (p=0.742),nan (p=nan)
-RQ02,Duration (hours),-0.459 (p=0.000),nan (p=nan)
-RQ03,Description Length,-0.072 (p=0.001),nan (p=nan)
-RQ04,Participants,nan (p=nan),nan (p=nan)
-RQ04,Comments,nan (p=nan),nan (p=nan)
