@@ -1,0 +1,7 @@
+Research Question,Dimension,Vs. Status,Vs. Reviews
+RQ01,Changed Files,0.020 (p=0.714),0.077 (p=0.160)
+RQ01,Total Changes,0.028 (p=0.611),0.129 (p=0.018)
+RQ02,Duration (hours),-0.274 (p=0.000),0.144 (p=0.008)
+RQ03,Description Length,-0.025 (p=0.653),0.144 (p=0.008)
+RQ04,Participants,-0.174 (p=0.001),0.306 (p=0.000)
+RQ04,Comments,-0.059 (p=0.279),0.349 (p=0.000)

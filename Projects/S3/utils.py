@@ -11,6 +11,7 @@ from tqdm import tqdm
 import json
 from dotenv import load_dotenv
 import concurrent.futures
+import ast
 
 # Load environment variables from .env file
 load_dotenv()
@@ -446,9 +447,45 @@ def save_to_csv(data, filename):
     pd.DataFrame(data).to_csv(filename, index=False)
     print(f"Data saved to {filename}")
 
+def safe_json_loads(s):
+    try:
+        # Try json.loads first
+        return json.loads(s.replace("'", '"')) # Handle potential single quotes
+    except (json.JSONDecodeError, AttributeError):
+        try:
+            # Fallback to ast.literal_eval for simpler structures or if json fails
+            return ast.literal_eval(s)
+        except (ValueError, SyntaxError, TypeError):
+            # If it's neither valid JSON nor a Python literal (e.g., NaN, number), return as is
+            return s
+
 def load_from_csv(filename):
-    """Load data from a CSV file"""
-    return pd.read_csv(filename)
+    """Load data from a CSV file, attempting to parse dictionary-like columns"""
+    # Define columns that might contain dictionary-like strings
+    potential_dict_cols = ['repository', 'reviews', 'comments', 'participants']
+
+    # Read the CSV to get header first
+    try:
+        header = pd.read_csv(filename, nrows=0).columns.tolist()
+    except pd.errors.EmptyDataError:
+         print(f"Warning: CSV file '{filename}' is empty.")
+         return pd.DataFrame() # Return empty DataFrame
+    except FileNotFoundError:
+         print(f"Error: CSV file '{filename}' not found.")
+         return pd.DataFrame() # Return empty DataFrame
+
+
+    # Identify which potential dict columns actually exist in the CSV
+    cols_to_convert = {col: safe_json_loads for col in potential_dict_cols if col in header}
+
+    try:
+        # Read the full CSV applying the converters
+        return pd.read_csv(filename, converters=cols_to_convert)
+    except Exception as e:
+        print(f"Error loading or converting CSV '{filename}': {e}")
+        print("Attempting to load without converters...")
+        # Fallback to basic loading if conversion fails
+        return pd.read_csv(filename)
 
 def analyze_pr_status_vs_size(df):
     """RQ01: Analyze relationship between PR size and final review feedback"""
@@ -518,12 +555,16 @@ def analyze_pr_status_vs_interactions(df):
     """RQ04: Analyze relationship between interactions in PRs and final review feedback"""
     df['merged'] = df['state'].apply(lambda x: 1 if x == 'MERGED' else 0)
 
-    # Standardize interaction columns safely
-    df['participants.totalCount'] = df.apply(lambda row: row.get('participants.totalCount', 0) if isinstance(row.get('participants'), float) else row.get('participants', {}).get('totalCount', 0), axis=1)
-    df['comments.totalCount'] = df.apply(lambda row: row.get('comments.totalCount', 0) if isinstance(row.get('comments'), float) else row.get('comments', {}).get('totalCount', 0), axis=1)
+    # Safely extract counts, assuming 'participants' and 'comments' are dicts or NaN
+    df['participants_count'] = df['participants'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    df['comments_count'] = df['comments'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
 
-    participants_col = 'participants.totalCount'
-    comments_col = 'comments.totalCount'
+    participants_col = 'participants_count'
+    comments_col = 'comments_count'
 
     # Correlation with number of participants
     df_cleaned_p = df.dropna(subset=[participants_col, 'merged'])
@@ -550,9 +591,11 @@ def analyze_pr_status_vs_interactions(df):
 
 def analyze_reviews_vs_size(df):
     """RQ05: Analyze relationship between PR size and the number of reviews"""
-    # Standardize reviews column safely
-    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
-    reviews_col = 'reviews.totalCount'
+    # Safely extract review count
+    df['reviews_count'] = df['reviews'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    reviews_col = 'reviews_count'
 
     # Correlation analysis with changed files
     df_cleaned_f = df.dropna(subset=['changedFiles', reviews_col])
@@ -580,9 +623,11 @@ def analyze_reviews_vs_size(df):
 
 def analyze_reviews_vs_duration(df):
     """RQ06: Analyze relationship between PR analysis duration and the number of reviews"""
-    # Standardize reviews column safely
-    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
-    reviews_col = 'reviews.totalCount'
+    # Safely extract review count
+    df['reviews_count'] = df['reviews'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    reviews_col = 'reviews_count'
 
     df_cleaned = df.dropna(subset=['duration_hours', reviews_col])
     if df_cleaned.empty:
@@ -598,9 +643,11 @@ def analyze_reviews_vs_duration(df):
 
 def analyze_reviews_vs_description(df):
     """RQ07: Analyze relationship between PR description length and the number of reviews"""
-    # Standardize reviews column safely
-    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
-    reviews_col = 'reviews.totalCount'
+    # Safely extract review count
+    df['reviews_count'] = df['reviews'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    reviews_col = 'reviews_count'
 
     # Ensure bodyText is string before calculating length
     df['description_length'] = df['bodyText'].fillna('').astype(str).apply(len)
@@ -618,14 +665,20 @@ def analyze_reviews_vs_description(df):
 
 def analyze_reviews_vs_interactions(df):
     """RQ08: Analyze relationship between interactions in PRs and the number of reviews"""
-    # Standardize interaction and reviews columns safely
-    df['reviews.totalCount'] = df.apply(lambda row: row.get('reviews.totalCount', 0) if isinstance(row.get('reviews'), float) else row.get('reviews', {}).get('totalCount', 0), axis=1)
-    df['participants.totalCount'] = df.apply(lambda row: row.get('participants.totalCount', 0) if isinstance(row.get('participants'), float) else row.get('participants', {}).get('totalCount', 0), axis=1)
-    df['comments.totalCount'] = df.apply(lambda row: row.get('comments.totalCount', 0) if isinstance(row.get('comments'), float) else row.get('comments', {}).get('totalCount', 0), axis=1)
+    # Safely extract counts
+    df['reviews_count'] = df['reviews'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    df['participants_count'] = df['participants'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
+    df['comments_count'] = df['comments'].apply(
+        lambda x: x.get('totalCount', 0) if isinstance(x, dict) else 0
+    )
 
-    reviews_col = 'reviews.totalCount'
-    participants_col = 'participants.totalCount'
-    comments_col = 'comments.totalCount'
+    reviews_col = 'reviews_count'
+    participants_col = 'participants_count'
+    comments_col = 'comments_count'
 
     # Correlation with number of participants
     df_cleaned_p = df.dropna(subset=[participants_col, reviews_col])

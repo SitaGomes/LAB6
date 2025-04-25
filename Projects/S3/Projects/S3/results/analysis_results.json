@@ -1,0 +1,42 @@
+{
+    "RQ01": {
+        "files_correlation": 0.020038376911209015,
+        "files_p_value": 0.7135644292152009,
+        "changes_correlation": 0.027768685536068875,
+        "changes_p_value": 0.6109429317361276
+    },
+    "RQ02": {
+        "correlation": -0.2739670825100952,
+        "p_value": 3.114457123265415e-07
+    },
+    "RQ03": {
+        "correlation": -0.02450804106510751,
+        "p_value": 0.653451040845862
+    },
+    "RQ04": {
+        "participants_correlation": -0.17408022037707144,
+        "participants_p_value": 0.0013129350937112162,
+        "comments_correlation": -0.059071504622817864,
+        "comments_p_value": 0.2788354445507829
+    },
+    "RQ05": {
+        "files_correlation": 0.07665652344206626,
+        "files_p_value": 0.159676030619821,
+        "changes_correlation": 0.12851793868642128,
+        "changes_p_value": 0.018087050541371743
+    },
+    "RQ06": {
+        "correlation": 0.1443956737268126,
+        "p_value": 0.007842053789727825
+    },
+    "RQ07": {
+        "correlation": 0.1435980699467308,
+        "p_value": 0.008194367019784227
+    },
+    "RQ08": {
+        "participants_correlation": 0.30573710856633207,
+        "participants_p_value": 9.576597563113291e-09,
+        "comments_correlation": 0.34906908832010763,
+        "comments_p_value": 4.039505013804195e-11
+    }
+}
